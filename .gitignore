@@ -28,8 +28,13 @@ build/
 # Virtual environments
 venv/
 .venv/
+.venv.*/
 env/
 .env/
+
+# claude-seo runtime launcher state (scripts/claude-seo setup)
+runtime-state.json
+ms-playwright/
 
 # Secrets and credentials (NEVER commit these)
 .env
