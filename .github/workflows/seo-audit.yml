@@ -53,6 +53,7 @@ jobs:
           done
           cp agents/*.md ~/.claude/agents/
           cp -r scripts ~/.claude/skills/seo/scripts
+          cp requirements.txt ~/.claude/skills/seo/requirements.txt
           chmod +x ~/.claude/skills/seo/scripts/claude-seo
 
       - name: Run claude-seo setup (Python deps + Chromium)
