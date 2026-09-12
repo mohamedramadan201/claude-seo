@@ -1,0 +1,132 @@
+name: Run Claude SEO audit
+
+# Manually-triggered audit runner. GitHub-hosted runners have no proxy
+# restriction, so scripts/url_safety.py's loopback-proxy SSRF guard (which
+# blocks the mandatory 127.0.0.1 proxy inside a Claude Code Remote sandbox)
+# never fires here -- crawl-based subagents (seo-technical, seo-content,
+# seo-schema, seo-sitemap, seo-performance, seo-visual, seo-geo, seo-sxo)
+# can fetch and render real pages.
+#
+# Required repo secrets (Settings > Secrets and variables > Actions):
+#   ANTHROPIC_API_KEY        - runs the Claude Code agent that executes
+#                               the /seo-audit skill end-to-end
+# Optional repo secrets (enable the matching data source when present; the
+# audit runs fine without any of them, just without that enrichment):
+#   GOOGLE_API_KEY            - PageSpeed Insights / CrUX
+#   GOOGLE_SERVICE_ACCOUNT_JSON - full JSON key contents, for GSC/GA4/Indexing
+#   GA4_PROPERTY_ID           - e.g. properties/242533374
+#   GSC_PROPERTY              - e.g. https://www.example.com/
+#   MOZ_API_KEY               - Moz Link Explorer
+#   BING_WEBMASTER_API_KEY    - Bing Webmaster Tools
+#   BING_VERIFIED_SITES       - comma-separated verified site list
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Site to audit"
+        required: true
+        default: "https://www.al-dawaa.com/"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Full SEO audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install Claude SEO skill into ~/.claude
+        run: |
+          mkdir -p ~/.claude/skills ~/.claude/agents
+          for d in skills/*/; do
+            name=$(basename "$d")
+            cp -r "$d" ~/.claude/skills/"$name"
+          done
+          cp agents/*.md ~/.claude/agents/
+          cp -r scripts ~/.claude/skills/seo/scripts
+          chmod +x ~/.claude/skills/seo/scripts/claude-seo
+
+      - name: Run claude-seo setup (Python deps + Chromium)
+        run: ~/.claude/skills/seo/scripts/claude-seo setup
+
+      - name: Configure Google API credentials
+        if: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON != '' || secrets.GOOGLE_API_KEY != '' }}
+        env:
+          SA_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GA4_PROPERTY_ID: ${{ secrets.GA4_PROPERTY_ID }}
+          GSC_PROPERTY: ${{ secrets.GSC_PROPERTY }}
+        run: |
+          mkdir -p ~/.config/claude-seo
+          if [ -n "$SA_JSON" ]; then
+            echo "$SA_JSON" > ~/.config/claude-seo/service-account.json
+            chmod 600 ~/.config/claude-seo/service-account.json
+          fi
+          python3 - <<'PY'
+          import json, os
+          cfg = {}
+          if os.environ.get("SA_JSON"):
+              cfg["service_account_path"] = os.path.expanduser("~/.config/claude-seo/service-account.json")
+          if os.environ.get("API_KEY"):
+              cfg["api_key"] = os.environ["API_KEY"]
+          if os.environ.get("GA4_PROPERTY_ID"):
+              cfg["ga4_property_id"] = os.environ["GA4_PROPERTY_ID"]
+          if os.environ.get("GSC_PROPERTY"):
+              cfg["default_property"] = os.environ["GSC_PROPERTY"]
+          path = os.path.expanduser("~/.config/claude-seo/google-api.json")
+          json.dump(cfg, open(path, "w"), indent=2)
+          os.chmod(path, 0o600)
+          PY
+
+      - name: Configure backlink API credentials
+        if: ${{ secrets.MOZ_API_KEY != '' || secrets.BING_WEBMASTER_API_KEY != '' }}
+        env:
+          MOZ_API_KEY: ${{ secrets.MOZ_API_KEY }}
+          BING_API_KEY: ${{ secrets.BING_WEBMASTER_API_KEY }}
+          BING_VERIFIED_SITES: ${{ secrets.BING_VERIFIED_SITES }}
+        run: |
+          mkdir -p ~/.config/claude-seo
+          python3 - <<'PY'
+          import json, os
+          cfg = {}
+          if os.environ.get("MOZ_API_KEY"):
+              cfg["moz_api_key"] = os.environ["MOZ_API_KEY"]
+          if os.environ.get("BING_API_KEY"):
+              cfg["bing_api_key"] = os.environ["BING_API_KEY"]
+          sites = os.environ.get("BING_VERIFIED_SITES", "")
+          if sites:
+              cfg["bing_verified_sites"] = [s.strip() for s in sites.split(",") if s.strip()]
+          path = os.path.expanduser("~/.config/claude-seo/backlinks-api.json")
+          json.dump(cfg, open(path, "w"), indent=2)
+          os.chmod(path, 0o600)
+          PY
+
+      - name: Run /seo-audit via Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            /seo-audit ${{ github.event.inputs.target_url }}
+            Write all audit artifacts under ./audit-output/ instead of the
+            repo root. Do not commit or push anything.
+          claude_args: |
+            --allowed-tools "Bash,Read,Write,Glob,Grep,WebFetch"
+            --max-turns 60
+
+      - name: Upload audit artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seo-audit-report
+          path: audit-output/
+          if-no-files-found: warn
+          retention-days: 30
